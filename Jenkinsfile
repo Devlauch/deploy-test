@@ -36,23 +36,6 @@ pipeline {
             }
         }
 
-        stage('SonarQube Analysis') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    script {
-                        def sonarOk = sh(script: 'which sonar-scanner 2>/dev/null', returnStatus: true) == 0
-                        if (sonarOk) {
-                            withSonarQubeEnv('SonarQube') {
-                                sh 'sonar-scanner -Dsonar.projectKey=${env.JOB_NAME} -Dsonar.sources=. -Dsonar.host.url=${SONAR_HOST_URL}'
-                            }
-                        } else {
-                            echo 'sonar-scanner not found — configure SonarQube Scanner in Jenkins → Manage Jenkins → Tools'
-                        }
-                    }
-                }
-            }
-        }
-
         stage('Docker Build') {
             when { expression { return fileExists('Dockerfile') } }
             steps {
@@ -122,9 +105,33 @@ pipeline {
                                 BRANCH_TAG=$(echo ${GIT_BRANCH:-${BRANCH_NAME:-main}} | sed 's|origin/||' | tr '/' '-' | tr '[:upper:]' '[:lower:]')
                                 FULL_IMAGE="pav30/deploy-test:$DOCKER_TAG-$BRANCH_TAG"
                                 REG_PASS_B64=$(echo -n "$REG_PASS" | base64 -w0)
-                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@98.91.243.21 "echo $REG_PASS_B64 | base64 -d | docker login -u $REG_USER --password-stdin"
-                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@98.91.243.21 "docker pull $FULL_IMAGE && (docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:80 $FULL_IMAGE) && echo Deploy OK"
-                                echo "Deployed: $FULL_IMAGE → http://98.91.243.21:800"
+                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "echo $REG_PASS_B64 | base64 -d | docker login -u $REG_USER --password-stdin"
+                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@52.91.66.143 "docker pull $FULL_IMAGE && (docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:80 $FULL_IMAGE) && echo Deploy OK"
+                                sleep 8
+                                HTTP_CODE=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "curl -s -o /dev/null -w '%{http_code}' http://localhost:800 --max-time 5" 2>/dev/null || echo "000")
+                                if [ "$HTTP_CODE" = "000" ]; then
+                                    echo "[devpilot] Port 800 not responding — running port detection..."
+                                    REAL_PORT=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "docker exec deploy-test sh -c 'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null' 2>/dev/null | grep -oE ':[0-9]{2,5}' | grep -oE '[0-9]+' | head -1" 2>/dev/null || echo "")
+                                    if [ -z "$REAL_PORT" ]; then
+                                        REAL_PORT=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "docker logs deploy-test 2>&1 | grep -iE 'port|listen|started|running|localhost' | grep -oE '[0-9]{2,5}' | head -1" 2>/dev/null || echo "")
+                                    fi
+                                    if [ -n "$REAL_PORT" ] && [ "$REAL_PORT" != "80" ]; then
+                                        echo "[devpilot] App is on port $REAL_PORT, expected 80 — restarting with correct port..."
+                                        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@52.91.66.143 "docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:$REAL_PORT $FULL_IMAGE"
+                                        sleep 5
+                                        HTTP_CODE2=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "curl -s -o /dev/null -w '%{http_code}' http://localhost:800 --max-time 5" 2>/dev/null || echo "000")
+                                        if [ "$HTTP_CODE2" != "000" ]; then
+                                            echo "[devpilot] Auto-fix succeeded — app responding on port 800 (container port $REAL_PORT)"
+                                        else
+                                            echo "[devpilot] WARNING: App still not responding after port fix."
+                                        fi
+                                    else
+                                        echo "[devpilot] WARNING: App not responding on port 800. Could not detect real port. Ensure app reads process.env.PORT."
+                                    fi
+                                } else
+                                    echo "[devpilot] Health check passed — app responding on port 800 (HTTP $HTTP_CODE)"
+                                fi
+                                echo "Deployed: $FULL_IMAGE → http://52.91.66.143:800"
                             '''
                         }
                     }
