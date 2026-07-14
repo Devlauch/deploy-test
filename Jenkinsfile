@@ -13,29 +13,6 @@ pipeline {
             }
         }
 
-        stage('Setup Tools') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh '''
-                        TOOLS_DIR="$HOME/devpilot-tools"
-                        mkdir -p "$TOOLS_DIR/bin"
-
-                        if ! which docker 2>/dev/null && [ ! -x "$TOOLS_DIR/bin/docker" ]; then
-                            DOCKER_VERSION=24.0.7
-                            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker-cli.tgz 2>/dev/null || true
-                            tar -xz -C /tmp -f /tmp/docker-cli.tgz 2>/dev/null || true
-                            mv /tmp/docker/docker "$TOOLS_DIR/bin/docker" 2>/dev/null || true
-                            rm -rf /tmp/docker-cli.tgz /tmp/docker 2>/dev/null || true
-                        fi
-
-                        if ! which trivy 2>/dev/null && [ ! -x "$TOOLS_DIR/bin/trivy" ]; then
-                            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$TOOLS_DIR/bin" 2>/dev/null || true
-                        fi
-                    '''
-                }
-            }
-        }
-
         stage('Docker Build') {
             when { expression { return fileExists('Dockerfile') } }
             steps {
@@ -105,21 +82,21 @@ pipeline {
                                 BRANCH_TAG=$(echo ${GIT_BRANCH:-${BRANCH_NAME:-main}} | sed 's|origin/||' | tr '/' '-' | tr '[:upper:]' '[:lower:]')
                                 FULL_IMAGE="pav30/deploy-test:$DOCKER_TAG-$BRANCH_TAG"
                                 REG_PASS_B64=$(echo -n "$REG_PASS" | base64 -w0)
-                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "echo $REG_PASS_B64 | base64 -d | docker login -u $REG_USER --password-stdin"
-                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@52.91.66.143 "docker pull $FULL_IMAGE && (docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:80 $FULL_IMAGE) && echo Deploy OK"
+                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@35.175.182.188 "echo $REG_PASS_B64 | base64 -d | docker login -u $REG_USER --password-stdin"
+                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@35.175.182.188 "docker pull $FULL_IMAGE && (docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:80 $FULL_IMAGE) && echo Deploy OK"
                                 sleep 8
-                                HTTP_CODE=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "curl -s -o /dev/null -w '%{http_code}' http://localhost:800 --max-time 5" 2>/dev/null || echo "000")
+                                HTTP_CODE=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@35.175.182.188 "curl -s -o /dev/null -w '%{http_code}' http://localhost:800 --max-time 5" 2>/dev/null || echo "000")
                                 if [ "$HTTP_CODE" = "000" ]; then
                                     echo "[devpilot] Port 800 not responding — running port detection..."
-                                    REAL_PORT=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "docker exec deploy-test sh -c 'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null' 2>/dev/null | grep -oE ':[0-9]{2,5}' | grep -oE '[0-9]+' | head -1" 2>/dev/null || echo "")
+                                    REAL_PORT=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@35.175.182.188 "docker exec deploy-test sh -c 'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null' 2>/dev/null | grep -oE ':[0-9]{2,5}' | grep -oE '[0-9]+' | head -1" 2>/dev/null || echo "")
                                     if [ -z "$REAL_PORT" ]; then
-                                        REAL_PORT=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "docker logs deploy-test 2>&1 | grep -iE 'port|listen|started|running|localhost' | grep -oE '[0-9]{2,5}' | head -1" 2>/dev/null || echo "")
+                                        REAL_PORT=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@35.175.182.188 "docker logs deploy-test 2>&1 | grep -iE 'port|listen|started|running|localhost' | grep -oE '[0-9]{2,5}' | head -1" 2>/dev/null || echo "")
                                     fi
                                     if [ -n "$REAL_PORT" ] && [ "$REAL_PORT" != "80" ]; then
                                         echo "[devpilot] App is on port $REAL_PORT, expected 80 — restarting with correct port..."
-                                        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@52.91.66.143 "docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:$REAL_PORT $FULL_IMAGE"
+                                        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@35.175.182.188 "docker stop deploy-test 2>/dev/null; docker rm deploy-test 2>/dev/null; docker run -d --name deploy-test --restart unless-stopped -p 800:$REAL_PORT $FULL_IMAGE"
                                         sleep 5
-                                        HTTP_CODE2=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@52.91.66.143 "curl -s -o /dev/null -w '%{http_code}' http://localhost:800 --max-time 5" 2>/dev/null || echo "000")
+                                        HTTP_CODE2=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@35.175.182.188 "curl -s -o /dev/null -w '%{http_code}' http://localhost:800 --max-time 5" 2>/dev/null || echo "000")
                                         if [ "$HTTP_CODE2" != "000" ]; then
                                             echo "[devpilot] Auto-fix succeeded — app responding on port 800 (container port $REAL_PORT)"
                                         else
@@ -128,10 +105,10 @@ pipeline {
                                     else
                                         echo "[devpilot] WARNING: App not responding on port 800. Could not detect real port. Ensure app reads process.env.PORT."
                                     fi
-                                } else
+                                else
                                     echo "[devpilot] Health check passed — app responding on port 800 (HTTP $HTTP_CODE)"
                                 fi
-                                echo "Deployed: $FULL_IMAGE → http://52.91.66.143:800"
+                                echo "Deployed: $FULL_IMAGE → http://35.175.182.188:800"
                             '''
                         }
                     }
