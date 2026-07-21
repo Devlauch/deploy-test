@@ -4,7 +4,7 @@ pipeline {
     environment {
         REPO_URL = 'https://github.com/Devlauch/deploy-test.git'
         BRANCH   = 'main'
-        JOB      = 'securjenkins-deploy-test-754264'
+        JOB      = 'securjenkins-deploy-test-113887'
     }
 
     stages {
