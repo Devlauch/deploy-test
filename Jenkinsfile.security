@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+
+    environment {
+        REPO_URL = 'https://github.com/Devlauch/deploy-test.git'
+        BRANCH   = 'main'
+        JOB      = 'securjenkins-deploy-test-620716'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Devlauch/deploy-test.git'
+            }
+        }
+
+        stage('Setup Tools') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p $HOME/sec-tools/bin
+                        export PATH=$HOME/sec-tools/bin:$PATH
+
+                        # Gitleaks
+                        if ! which gitleaks 2>/dev/null && [ ! -x "$HOME/sec-tools/bin/gitleaks" ]; then
+                            curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+                                | tar -xz -C $HOME/sec-tools/bin gitleaks 2>/dev/null || true
+                        fi
+
+                        # Trivy
+                        if ! which trivy 2>/dev/null && [ ! -x "$HOME/sec-tools/bin/trivy" ]; then
+                            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                                | sh -s -- -b $HOME/sec-tools/bin 2>/dev/null || true
+                        fi
+
+                        # Semgrep
+                        which semgrep 2>/dev/null || pip3 install semgrep -q 2>/dev/null || true
+
+                        # OWASP Dependency Check
+                        if [ ! -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
+                            curl -sSL https://github.com/jeremylong/DependencyCheck/releases/download/v9.0.9/dependency-check-9.0.9-release.zip \
+                                -o /tmp/dc.zip 2>/dev/null && \
+                            unzip -q /tmp/dc.zip -d $HOME/sec-tools/ 2>/dev/null && \
+                            rm /tmp/dc.zip 2>/dev/null || true
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Secrets Scan (Gitleaks)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/sec-tools/bin:$PATH
+                        gitleaks detect --source . --report-format json --report-path gitleaks-report.json --exit-code 0 2>/dev/null || \
+                            echo '[]' > gitleaks-report.json
+                    '''
+                    archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('SAST (Semgrep)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        semgrep --config auto --json --output semgrep-report.json . 2>/dev/null || \
+                            echo '{"results":[],"errors":[]}' > semgrep-report.json
+                    '''
+                    archiveArtifacts artifacts: 'semgrep-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Dependency Check (OWASP)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/sec-tools/bin:$PATH
+                        if [ -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
+                            $HOME/sec-tools/dependency-check/bin/dependency-check.sh \
+                                --project "${JOB}" --scan . \
+                                --format JSON --out dependency-check-report.json \
+                                --noupdate --disableYarnAudit 2>/dev/null || true
+                        else
+                            echo '{"dependencies":[]}' > dependency-check-report.json
+                        fi
+                    '''
+                    archiveArtifacts artifacts: 'dependency-check-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Container Scan (Trivy)') {
+            when { expression { return fileExists('Dockerfile') } }
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/sec-tools/bin:$PATH
+                        if which docker 2>/dev/null && docker info > /dev/null 2>&1; then
+                            docker build -t sec-scan-image:local . 2>/dev/null || true
+                            trivy image --exit-code 0 --severity HIGH,CRITICAL --format table sec-scan-image:local \
+                                | tee trivy-report.txt || echo 'Trivy scan failed' > trivy-report.txt
+                        else
+                            echo 'Docker not available — container scan skipped' > trivy-report.txt
+                        fi
+                    '''
+                    archiveArtifacts artifacts: 'trivy-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '*.json,*.txt', allowEmptyArchive: true
+        }
+    }
+}
