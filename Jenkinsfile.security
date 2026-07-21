@@ -4,7 +4,7 @@ pipeline {
     environment {
         REPO_URL = 'https://github.com/Devlauch/deploy-test.git'
         BRANCH   = 'main'
-        JOB      = 'securjenkins-deploy-test-413068'
+        JOB      = 'securjenkins-deploy-test-397645'
     }
 
     stages {
@@ -65,8 +65,8 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        semgrep --config auto --json --output semgrep-report.json . 2>/dev/null || \
-                            echo '{"results":[],"errors":[]}' > semgrep-report.json
+                        semgrep --config auto --json --output semgrep-report.json . 2>/dev/null || true
+                        [ -f semgrep-report.json ] || echo '{"results":[],"errors":[]}' > semgrep-report.json
                     '''
                     archiveArtifacts artifacts: 'semgrep-report.json', allowEmptyArchive: true
                 }
@@ -81,11 +81,10 @@ pipeline {
                         if [ -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
                             $HOME/sec-tools/dependency-check/bin/dependency-check.sh \
                                 --project "${JOB}" --scan . \
-                                --format JSON --out dependency-check-report.json \
-                                --noupdate --disableYarnAudit 2>/dev/null || true
-                        else
-                            echo '{"dependencies":[]}' > dependency-check-report.json
+                                --format JSON --out . \
+                                --disableYarnAudit 2>/dev/null || true
                         fi
+                        [ -f dependency-check-report.json ] || echo '{"dependencies":[]}' > dependency-check-report.json
                     '''
                     archiveArtifacts artifacts: 'dependency-check-report.json', allowEmptyArchive: true
                 }
