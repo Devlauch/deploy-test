@@ -4,7 +4,7 @@ pipeline {
     environment {
         REPO_URL = 'https://github.com/Devlauch/deploy-test.git'
         BRANCH   = 'main'
-        JOB      = 'securjenkins-deploy-test-712222'
+        JOB      = 'securjenkins-deploy-test-648253'
     }
 
     stages {
@@ -33,15 +33,13 @@ pipeline {
                                 | sh -s -- -b $HOME/sec-tools/bin 2>/dev/null || true
                         fi
 
-                        # Semgrep
-                        which semgrep 2>/dev/null || pip3 install semgrep -q 2>/dev/null || true
-
-                        # OWASP Dependency Check
-                        if [ ! -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
-                            curl -sSL https://github.com/jeremylong/DependencyCheck/releases/download/v9.0.9/dependency-check-9.0.9-release.zip \
-                                -o /tmp/dc.zip 2>/dev/null && \
-                            unzip -q /tmp/dc.zip -d $HOME/sec-tools/ 2>/dev/null && \
-                            rm /tmp/dc.zip 2>/dev/null || true
+                        # SonarQube Scanner (only if SONAR_HOST_URL is configured)
+                        if [ -n "$SONAR_HOST_URL" ] && [ ! -f "$HOME/sec-tools/sonar-scanner/bin/sonar-scanner" ]; then
+                            curl -sSL https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip \
+                                -o /tmp/sonar.zip 2>/dev/null && \
+                            unzip -q /tmp/sonar.zip -d /tmp/sonar-extract/ 2>/dev/null && \
+                            mv /tmp/sonar-extract/sonar-scanner-* $HOME/sec-tools/sonar-scanner 2>/dev/null || true && \
+                            rm -rf /tmp/sonar.zip /tmp/sonar-extract 2>/dev/null || true
                         fi
                     '''
                 }
@@ -61,32 +59,43 @@ pipeline {
             }
         }
 
-        stage('SAST (Semgrep)') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh '''
-                        semgrep --config auto --json --output semgrep-report.json . 2>/dev/null || true
-                        [ -f semgrep-report.json ] || echo '{"results":[],"errors":[]}' > semgrep-report.json
-                    '''
-                    archiveArtifacts artifacts: 'semgrep-report.json', allowEmptyArchive: true
-                }
-            }
-        }
-
-        stage('Dependency Check (OWASP)') {
+        stage('SAST (SonarQube)') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
                         export PATH=$HOME/sec-tools/bin:$PATH
-                        if [ -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
-                            $HOME/sec-tools/dependency-check/bin/dependency-check.sh \
-                                --project "${JOB}" --scan . \
-                                --format JSON --out . \
-                                --disableYarnAudit 2>/dev/null || true
+                        if [ -n "$SONAR_HOST_URL" ] && [ -n "$SONAR_TOKEN" ]; then
+                            $HOME/sec-tools/sonar-scanner/bin/sonar-scanner \
+                                -Dsonar.projectKey=${JOB} \
+                                -Dsonar.sources=. \
+                                -Dsonar.host.url=$SONAR_HOST_URL \
+                                -Dsonar.token=$SONAR_TOKEN 2>&1 || true
+                            if [ -f .scannerwork/report-task.txt ]; then
+                                PROJ=$(grep 'projectKey=' .scannerwork/report-task.txt | cut -d= -f2)
+                                DASH=$(grep 'dashboardUrl=' .scannerwork/report-task.txt | sed 's/dashboardUrl=//')
+                                echo "{\"status\":\"OK\",\"projectKey\":\"$PROJ\",\"dashboardUrl\":\"$DASH\"}" > sonarqube-report.json
+                            else
+                                echo '{"status":"FAILED","message":"sonar-scanner ran but produced no report"}' > sonarqube-report.json
+                            fi
+                        else
+                            echo '{"status":"NOT_CONFIGURED","message":"Set SONAR_HOST_URL and SONAR_TOKEN as Jenkins global environment variables to enable SonarQube scanning."}' > sonarqube-report.json
                         fi
-                        [ -f dependency-check-report.json ] || echo '{"dependencies":[]}' > dependency-check-report.json
                     '''
-                    archiveArtifacts artifacts: 'dependency-check-report.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'sonarqube-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Dependency Scan (Trivy FS)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/sec-tools/bin:$PATH
+                        trivy fs . --format json --exit-code 0 --severity HIGH,CRITICAL \
+                            --output trivy-fs-report.json 2>/dev/null || \
+                            echo '{"SchemaVersion":2,"Results":[]}' > trivy-fs-report.json
+                    '''
+                    archiveArtifacts artifacts: 'trivy-fs-report.json', allowEmptyArchive: true
                 }
             }
         }
