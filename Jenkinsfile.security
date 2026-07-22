@@ -4,7 +4,7 @@ pipeline {
     environment {
         REPO_URL = 'https://github.com/Devlauch/deploy-test.git'
         BRANCH   = 'main'
-        JOB      = 'securjenkins-deploy-test-986692'
+        JOB      = 'securjenkins-deploy-test-087502'
     }
 
     stages {
@@ -33,6 +33,13 @@ pipeline {
                                 | sh -s -- -b $HOME/sec-tools/bin 2>/dev/null || true
                         fi
 
+                        # Checkov (IaC scanner) — bootstrap pip if missing, then install
+                        if ! python3 -m checkov --version > /dev/null 2>&1; then
+                            python3 -m ensurepip --upgrade 2>/dev/null || \
+                                curl -sSL https://bootstrap.pypa.io/get-pip.py | python3 - --quiet 2>/dev/null || true
+                            python3 -m pip install checkov --quiet 2>/dev/null || true
+                        fi
+
                         # SonarQube Scanner (only if SONAR_HOST_URL is configured)
                         if [ -n "$SONAR_HOST_URL" ] && [ ! -f "$HOME/sec-tools/sonar-scanner/bin/sonar-scanner" ]; then
                             curl -sSL https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip \
@@ -51,7 +58,7 @@ pipeline {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
                         export PATH=$HOME/sec-tools/bin:$PATH
-                        gitleaks detect --source . --report-format json --report-path gitleaks-report.json --exit-code 0 2>/dev/null || \
+                        gitleaks detect --source . --no-git --report-format json --report-path gitleaks-report.json --exit-code 0 2>/dev/null || \
                             echo '[]' > gitleaks-report.json
                     '''
                     archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
@@ -73,7 +80,7 @@ pipeline {
                             if [ -f .scannerwork/report-task.txt ]; then
                                 PROJ=$(grep 'projectKey=' .scannerwork/report-task.txt | cut -d= -f2)
                                 DASH=$(grep 'dashboardUrl=' .scannerwork/report-task.txt | sed 's/dashboardUrl=//')
-                                echo "{\"status\":\"OK\",\"projectKey\":\"$PROJ\",\"dashboardUrl\":\"$DASH\"}" > sonarqube-report.json
+                                echo '{"status":"OK","projectKey":"'"$PROJ"'","dashboardUrl":"'"$DASH"'"}' > sonarqube-report.json
                             else
                                 echo '{"status":"FAILED","message":"sonar-scanner ran but produced no report"}' > sonarqube-report.json
                             fi
@@ -96,6 +103,19 @@ pipeline {
                             echo '{"SchemaVersion":2,"Results":[]}' > trivy-fs-report.json
                     '''
                     archiveArtifacts artifacts: 'trivy-fs-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('IaC Scan (Checkov)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/.local/bin:$PATH
+                        python3 -m checkov -d . --framework dockerfile,docker_compose --output json --soft-fail > checkov-report.json 2>/dev/null || \
+                            echo '{"results":{"passed_checks":[],"failed_checks":[]},"summary":{"passed":0,"failed":0,"skipped":0}}' > checkov-report.json
+                    '''
+                    archiveArtifacts artifacts: 'checkov-report.json', allowEmptyArchive: true
                 }
             }
         }
