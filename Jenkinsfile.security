@@ -4,7 +4,7 @@ pipeline {
     environment {
         REPO_URL = 'https://github.com/Devlauch/deploy-test.git'
         BRANCH   = 'main'
-        JOB      = 'securjenkins-deploy-test-816492'
+        JOB      = 'securjenkins-deploy-test-264968'
     }
 
     stages {
@@ -48,6 +48,32 @@ pipeline {
                             mv /tmp/sonar-extract/sonar-scanner-* $HOME/sec-tools/sonar-scanner 2>/dev/null || true && \
                             rm -rf /tmp/sonar.zip /tmp/sonar-extract 2>/dev/null || true
                         fi
+
+                        # OWASP Dependency-Check
+                        if [ ! -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
+                            DC_VERSION="10.0.4"
+                            curl -sSL "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" \
+                                -o /tmp/dc.zip 2>/dev/null && \
+                            unzip -q /tmp/dc.zip -d $HOME/sec-tools/ 2>/dev/null && \
+                            rm -f /tmp/dc.zip 2>/dev/null || true
+                        fi
+
+                        # TruffleHog (secrets scanner)
+                        if [ ! -x "$HOME/sec-tools/bin/trufflehog" ]; then
+                            curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+                                | sh -s -- -b $HOME/sec-tools/bin 2>/dev/null || true
+                        fi
+
+                        # Semgrep (SAST)
+                        if ! python3 -m semgrep --version > /dev/null 2>&1; then
+                            python3 -m pip install semgrep --quiet 2>/dev/null || true
+                        fi
+
+                        # Grype (container/image vulnerability scanner)
+                        if ! which grype 2>/dev/null && [ ! -x "$HOME/sec-tools/bin/grype" ]; then
+                            curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+                                | sh -s -- -b $HOME/sec-tools/bin 2>/dev/null || true
+                        fi
                     '''
                 }
             }
@@ -62,6 +88,26 @@ pipeline {
                             echo '[]' > gitleaks-report.json
                     '''
                     archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Secrets Scan (TruffleHog)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/sec-tools/bin:$PATH
+                        if which trufflehog 2>/dev/null; then
+                            trufflehog filesystem . --json --no-update --only-verified=false 2>/dev/null \
+                                | head -2000 > trufflehog-report.jsonl || true
+                            if [ ! -s trufflehog-report.jsonl ]; then
+                                echo '' > trufflehog-report.jsonl
+                            fi
+                        else
+                            echo '' > trufflehog-report.jsonl
+                        fi
+                    '''
+                    archiveArtifacts artifacts: 'trufflehog-report.jsonl', allowEmptyArchive: true
                 }
             }
         }
@@ -93,6 +139,26 @@ pipeline {
             }
         }
 
+        stage('SAST (Semgrep)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        export PATH=$HOME/.local/bin:$PATH
+                        if python3 -m semgrep --version > /dev/null 2>&1; then
+                            python3 -m semgrep --config=auto . --json --output semgrep-sast-report.json \
+                                --timeout 60 --max-memory 512 --no-git-ignore 2>/dev/null || \
+                            python3 -m semgrep --config=p/default . --json --output semgrep-sast-report.json \
+                                --timeout 60 2>/dev/null || \
+                            echo '{"results":[],"errors":[]}' > semgrep-sast-report.json
+                        else
+                            echo '{"results":[],"errors":[]}' > semgrep-sast-report.json
+                        fi
+                    '''
+                    archiveArtifacts artifacts: 'semgrep-sast-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
         stage('Dependency Scan (Trivy FS)') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -103,6 +169,32 @@ pipeline {
                             echo '{"SchemaVersion":2,"Results":[]}' > trivy-fs-report.json
                     '''
                     archiveArtifacts artifacts: 'trivy-fs-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Dependency Scan (OWASP DC)') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        if [ -f "$HOME/sec-tools/dependency-check/bin/dependency-check.sh" ]; then
+                            $HOME/sec-tools/dependency-check/bin/dependency-check.sh \
+                                --project "${JOB}" \
+                                --scan . \
+                                --format JSON \
+                                --out . \
+                                --noupdate 2>/dev/null || \
+                            $HOME/sec-tools/dependency-check/bin/dependency-check.sh \
+                                --project "${JOB}" \
+                                --scan . \
+                                --format JSON \
+                                --out . 2>/dev/null || true
+                            mv dependency-check-report.json owasp-dc-report.json 2>/dev/null || true
+                        else
+                            echo '{"dependencies":[]}' > owasp-dc-report.json
+                        fi
+                    '''
+                    archiveArtifacts artifacts: 'owasp-dc-report.json', allowEmptyArchive: true
                 }
             }
         }
@@ -120,7 +212,7 @@ pipeline {
             }
         }
 
-        stage('Container Scan (Trivy)') {
+        stage('Container Scan (Trivy + Grype)') {
             when { expression { return fileExists('Dockerfile') } }
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -128,13 +220,28 @@ pipeline {
                         export PATH=$HOME/sec-tools/bin:$PATH
                         if which docker 2>/dev/null && docker info > /dev/null 2>&1; then
                             docker build -t sec-scan-image:local . 2>/dev/null || true
+
+                            # Trivy image scan (JSON + plain text)
+                            trivy image --exit-code 0 --severity HIGH,CRITICAL --format json sec-scan-image:local \
+                                > trivy-image-report.json 2>/dev/null || \
+                                echo '{"SchemaVersion":2,"Results":[]}' > trivy-image-report.json
                             trivy image --exit-code 0 --severity HIGH,CRITICAL --format table sec-scan-image:local \
-                                | tee trivy-report.txt || echo 'Trivy scan failed' > trivy-report.txt
+                                > trivy-report.txt 2>/dev/null || echo 'Trivy scan failed' > trivy-report.txt
+
+                            # Grype image scan
+                            if which grype 2>/dev/null; then
+                                grype sec-scan-image:local -o json > grype-report.json 2>/dev/null || \
+                                    echo '{"matches":[]}' > grype-report.json
+                            else
+                                echo '{"matches":[]}' > grype-report.json
+                            fi
                         else
+                            echo '{"SchemaVersion":2,"Results":[]}' > trivy-image-report.json
+                            echo '{"matches":[]}' > grype-report.json
                             echo 'Docker not available — container scan skipped' > trivy-report.txt
                         fi
                     '''
-                    archiveArtifacts artifacts: 'trivy-report.txt', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'trivy-image-report.json,grype-report.json,trivy-report.txt', allowEmptyArchive: true
                 }
             }
         }
